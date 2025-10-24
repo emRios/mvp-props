@@ -1,0 +1,71 @@
+# --- Root .gitignore for mvp-props ---
+
+# Node / Vite / Vue
+node_modules/
+dist/
+dist-ssr/
+.vite/
+vite.cache/
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Test coverage / temp
+coverage/
+.tmp/
+temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Editor/IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+
+# Framework outputs (keep for safety if repo grows)
+.next/
+.nuxt/
+.svelte-kit/
+.storybook-out/
+
+# Deployment artifacts
+.vercel/
+.netlify/
+
+# Misc
+*.swp
+*.swo
+*.tmp
+~$*
+
+# .NET / C# (backend)
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userprefs
+
+# App settings (keep example only)
+backend/appsettings.json
+backend/appsettings.Development.json
+!backend/appsettings.json.example

@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["success", "data"],
+  "properties": {
+    "success": {
+      "type": "boolean"
+    },
+    "data": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "integer" },
+          "propiedad": { "type": ["string", "null"] },
+          "area": { "type": ["number", "null"] },
+          "tipo": { "type": ["string", "null"] },
+          "clase_tipo": { "type": ["string", "null"] },
+          "modelo": { "type": ["string", "null"] },
+          "ubicacion": { "type": ["string", "null"] },
+          "estado": { "type": ["string", "null"] },
+          "fin_de_obra": { "type": ["string", "null"] },
+          "fase": { "type": ["string", "null"] },
+          "bloqueo": { "type": ["string", "null"] },
+          "precio": { "type": ["number", "null"] },
+          "precio_sugerido": { "type": ["number", "null"] },
+          "proyectos_id": { "type": ["integer", "null"] },
+          "habitaciones": { "type": ["integer", "null"] },
+          "baños": { "type": ["number", "null"] },
+          "banos": { "type": ["number", "null"] },
+          "parqueos": { "type": ["integer", "null"] },
+          "m2construccion": { "type": ["number", "null"] },
+          "largo": { "type": ["number", "null"] },
+          "ancho": { "type": ["number", "null"] },
+          "año": { "type": ["integer", "null"] },
+          "ano": { "type": ["integer", "null"] },
+          "titulo": { "type": ["string", "null"] },
+          "descripcion": { "type": ["string", "null"] },
+          "detalles": { "type": ["string", "null"] },
+          "descripcion_corta": { "type": ["string", "null"] },
+          "caracteristicas": { "type": ["string", "null"] },
+          "latitud": { "type": ["number", "null"] },
+          "longitud": { "type": ["number", "null"] },
+          "comision_referencia": { "type": ["string", "null"] },
+          "comision_directa": { "type": ["string", "null"] },
+          "created_at": { "type": ["string", "null"] },
+          "updated_at": { "type": ["string", "null"] },
+          "proyecto": {
+            "type": ["object", "null"],
+            "properties": {
+              "id": { "type": "integer" },
+              "nombre_proyecto": { "type": ["string", "null"] },
+              "direccion": { "type": ["string", "null"] },
+              "aprobacion12cuotas": { "type": ["string", "null"] },
+              "tipo": { "type": ["string", "null"] },
+              "ubicacion": { "type": ["string", "null"] },
+              "estado": { "type": ["string", "null"] },
+              "created_at": { "type": ["string", "null"] },
+              "updated_at": { "type": ["string", "null"] }
+            }
+          },
+          "imagenes": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "required": ["tipo", "url", "formato"],
+              "properties": {
+                "tipo": { "type": "string" },
+                "url": { "type": "string" },
+                "formato": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

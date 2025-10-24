@@ -1,18 +1,25 @@
 // src/api.js
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
-const API_FAST = 'http://localhost:5002'; // Endpoint rápido para propiedades
 const API_KEY = import.meta.env.VITE_BACK_API_KEY;
 
 async function j(url, { method = 'GET', headers = {}, body, auth = false, timeout = 5000 } = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeout);
 
+  // Compose auth headers (support both Authorization and x-api-key just in case)
+  const authHeaders = (auth && API_KEY)
+    ? { Authorization: `Bearer ${API_KEY}`, 'x-api-key': API_KEY }
+    : {};
+  if (auth && !API_KEY) {
+    console.warn('Falta VITE_BACK_API_KEY: la petición autenticada podría fallar con 401');
+  }
+
   const res = await fetch(url, {
     method,
     headers: {
       'Accept': 'application/json',
       ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...(auth ? { Authorization: `Bearer ${API_KEY}` } : {}),
+      ...authHeaders,
       ...headers
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -25,14 +32,13 @@ async function j(url, { method = 'GET', headers = {}, body, auth = false, timeou
 }
 
 // === Catálogo (público) - Endpoint rápido ===
-export async function getProperties(page = 1, limit = 12, afterId = null) {
+export async function getProperties(page = 1, limit = 25, afterId = null) {
   try {
-    console.log(`⚡ Usando endpoint rápido - Página ${page}, Límite ${limit}`);
+  console.log(`Usando endpoint rápido - Página ${page}, Límite ${limit}`);
     
-    // Construir URL con parámetros
+    // Construir URL con parámetros (sin 'estado')
     const params = new URLSearchParams({
-      limit: limit.toString(),
-      estado: 'disponible' // Solo propiedades disponibles
+      limit: limit.toString()
     });
     
     // Para paginación cursor-based
@@ -40,17 +46,18 @@ export async function getProperties(page = 1, limit = 12, afterId = null) {
       params.set('afterId', afterId.toString());
     }
     
-    const url = `${API_FAST}/api/propiedades/miraiz?${params.toString()}`;
-    console.log('🚀 Request URL:', url);
+  const base = API_BASE.replace(/\/$/, '');
+  const url = `${base}/api/propiedades/miraiz?${params.toString()}`;
+    console.log('Request URL:', url);
     
     const start = Date.now();
     const r = await j(url);
     const latency = Date.now() - start;
     
-    console.log('📡 Respuesta rápida completa:', r);
+  console.log('Respuesta rápida completa:', r);
     
     if (!r?.success) {
-      console.warn('⚠️ Respuesta fallida:', r);
+  console.warn('Respuesta fallida:', r);
       return { 
         success: false, 
         data: [], 
@@ -67,11 +74,17 @@ export async function getProperties(page = 1, limit = 12, afterId = null) {
     }
     
     const properties = r.data || [];
-    const cursor = r.cursor; // Para siguiente página
-    const hasMore = properties.length === limit; // Si devolvió el límite completo, probablemente hay más
+    const serverCursor = r.cursor; // cursor que devuelva el backend (puede ser null)
+    // Fallback de cursor si el backend no lo envía: usamos el id del último elemento
+    const fallbackCursor = (!serverCursor && Array.isArray(properties) && properties.length === limit)
+      ? properties[properties.length - 1]?.id ?? null
+      : null;
+    const effectiveCursor = serverCursor ?? fallbackCursor;
+    // Hay más si existe cursor de servidor o si completó el lote exacto
+    const hasMore = (effectiveCursor !== null && effectiveCursor !== undefined) || (properties.length === limit);
     
-    console.log('✅ Propiedades obtenidas:', properties.length);
-    console.log(`⚡ Latencia ultra-rápida: ${latency}ms`);
+  console.log('Propiedades obtenidas:', properties.length);
+  console.log(`Latencia: ${latency}ms`);
     
     // Simular paginación tradicional para compatibilidad con el componente
     const pagination = {
@@ -81,7 +94,7 @@ export async function getProperties(page = 1, limit = 12, afterId = null) {
       limit: limit,
       hasNext: hasMore,
       hasPrev: page > 1,
-      cursor: cursor // Para siguiente request
+      cursor: effectiveCursor // Para siguiente request (server o fallback por último id)
     };
     
     return { 
@@ -93,33 +106,54 @@ export async function getProperties(page = 1, limit = 12, afterId = null) {
     };
     
   } catch (error) {
-    console.error('❌ Error en getProperties (endpoint rápido):', error);
+  console.error('Error en getProperties (endpoint rápido):', error);
     throw error;
   }
 }
 
-// === Interacciones protegidas (NLQ) ===
-export async function postInteraction({ userId = 'u-demo', pregunta, propiedadId = null }) {
-  if (!pregunta) throw new Error('Falta "pregunta" para la interacción');
-  const url = `${API_BASE}/interactions`;
-  const body = { userId, pregunta };
-  if (propiedadId) body.propiedadId = propiedadId;
-  return j(url, { method: 'POST', body, auth: true, timeout: 5000 });
+// === Catálogo completo (cliente pagina) ===
+export async function getAllProperties(batchLimit = 200) {
+  // Descarga todo el catálogo en lotes y lo devuelve en un solo arreglo
+  // Paginará el front; útil cuando queremos todas las imágenes/datos desde inicio
+  const all = [];
+  let cursor = null;
+  let page = 1;
+  while (true) {
+    const r = await getProperties(page, batchLimit, cursor);
+    if (!r?.success) break;
+    const data = Array.isArray(r.data) ? r.data : [];
+    all.push(...data);
+    cursor = r?.pagination?.cursor ?? null;
+    const hasNext = !!cursor || !!r?.pagination?.hasNext;
+    page += 1;
+    if (!hasNext) break;
+  }
+  return { success: true, data: all };
 }
 
-// NLQ directo (público) -> POST /api/nlq usando el texto para buscar
-export async function askNLQ(query, _opts = {}) {
+// === Interacciones (NLQ) - sin autenticación y sin userId ===
+export async function postInteraction({ pregunta, propiedadId = null }) {
+  if (!pregunta) throw new Error('Falta "pregunta" para la interacción');
+  const base = (import.meta.env.VITE_API_BASE || API_BASE).replace(/\/$/, '');
+  const url = `${base}/interactions`;
+  const body = { pregunta };
+  if (propiedadId) body.propiedadId = propiedadId;
+  return j(url, { method: 'POST', body, auth: false, timeout: 5000 });
+}
+
+// Normalizador para NLQ en frontend
+export async function askNLQ(query, opts = {}) {
   try {
-    const url = `${API_BASE}/api/nlq`;
-    const limit = Number(_opts.limit ?? 12);
-    const r = await j(url, { method: 'POST', body: { query, limit }, auth: false, timeout: 5000 });
-    // Normalizar múltiples posibles formas de respuesta
-    const answer = r?.answer || r?.message || null;
-    const toolPayload = r?.toolPayload || (Array.isArray(r?.data) ? { data: r.data } : null);
-    const success = r?.success !== undefined ? !!r.success : !!(answer || toolPayload);
-    return { success, answer, toolPayload };
+    // No se envía userId ni API Key
+    const r = await postInteraction({ pregunta: query });
+    // Se espera estructura: { success, answer, toolPayload? }
+    return {
+      success: !!r?.success,
+      answer: r?.answer || null,
+      toolPayload: r?.toolPayload || null
+    };
   } catch (e) {
-    console.error('❌ Error en askNLQ /api/nlq:', e);
+  console.error('Error en askNLQ:', e);
     return { success: false, answer: null, toolPayload: null, error: e?.message };
   }
 }

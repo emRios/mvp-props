@@ -11,9 +11,13 @@
         :lazy-loading="!isPriority"
         sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
         :quality="85"
+        :fallback-src="fallbackSrc"
+        :candidates="imgCandidates"
+        :max-tries="isPriority ? 1 : 2"
+        :per-try-timeout-ms="tryTimeoutMs"
       />
-      <div v-else class="no-image">
-        🏠
+      <div v-else class="no-image" aria-hidden="true">
+        Sin imagen
       </div>
     </div>
     <div class="body">
@@ -53,7 +57,7 @@ const area = computed(() => {
 const img = computed(() => {
   const list = Array.isArray(props.item.imagenes) ? props.item.imagenes : [];
   const first = list.find(x => x?.url);
-  if (!first) return '';
+  if (!first) return fallbackSrc.value;
   
   const baseUrl = getImageUrl(first.url);
   // Aplicar optimizaciones para cards y adaptación de red
@@ -69,6 +73,21 @@ const displayLoc = computed(() => {
   if (direccion && ubic) return `${direccion}, ${ubic}`;
   return direccion || ubic || '';
 });
+
+const fallbackSrc = computed(() => '/placeholder-house.svg');
+
+// Candidatos alternativos (segundas/terceras imágenes) por si falla la primera
+const imgCandidates = computed(() => {
+  const list = Array.isArray(props.item.imagenes) ? props.item.imagenes : [];
+  const urls = list
+    .map(x => x?.url)
+    .filter(Boolean)
+    .slice(1, 4) // hasta 3 adicionales
+    .map(u => getOptimizedImageUrl(getImageUrl(u), 'card'));
+  return urls;
+});
+
+const tryTimeoutMs = computed(() => (isPriority.value ? 900 : 1500));
 </script>
 
 <style scoped>

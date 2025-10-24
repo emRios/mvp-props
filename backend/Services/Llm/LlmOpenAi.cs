@@ -8,7 +8,6 @@ public sealed class LlmOpenAi(HttpClient http, string apiKey, string model) : IL
 {
   public async Task<LlmResponse> AskAsync(LlmRequest req, CancellationToken ct = default)
   {
-    // Guardrail: SOLO contexto. Si falta un dato, decirlo.
     var sys = "Responde SOLO con los datos del contexto. Si falta un dato, di: 'No tengo ese dato en el catálogo.'";
     var ctx = req.Context is null ? "" :
       $"[contexto]\nprecio:{req.Context.Precio}\nhabitaciones:{req.Context.Habitaciones}\nbaños:{req.Context.Banos}\nparqueos:{req.Context.Parqueos}\nm2:{req.Context.M2Construccion}\nubicacion:{req.Context.Ubicacion}\n[/contexto]";

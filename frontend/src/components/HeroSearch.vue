@@ -3,17 +3,17 @@
     <div class="search-form">
       <div class="form-row">
         <div class="form-group">
-          <label>Ubicación</label>
-          <input 
-            v-model="filters.location" 
-            type="text" 
-            class="form-input" 
+          <label for="location-input">Ubicación</label>
+          <input
+            id="location-input"
+            v-model="filters.location"
+            type="text"
+            class="form-input"
             placeholder="Ciudad, colonia..."
+            @keyup.enter="search"
           />
         </div>
-        <button @click="search" class="btn search-btn">
-          Buscar
-        </button>
+        <button @click="search" class="btn search-btn" aria-label="Buscar">Buscar</button>
       </div>
     </div>
   </div>
@@ -37,7 +37,8 @@ export default {
     dictatedLocation: {
       immediate: true,
       handler(val) {
-        if (typeof val === 'string' && val.length) {
+        // Permitir limpiar el campo cuando val === ''
+        if (typeof val === 'string') {
           this.filters.location = val;
         }
       }
@@ -77,9 +78,29 @@ export default {
   display: block;
 }
 
+.form-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 8px;
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
 .search-btn {
   height: fit-content;
   white-space: nowrap;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
 }
 
 @media (max-width: 768px) {

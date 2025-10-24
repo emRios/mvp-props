@@ -14,25 +14,23 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient();
 
-// Config
 var cfg         = builder.Configuration;
 var catalogUrl  = cfg["CatalogUrl"]  ?? "https://test.controldepropiedades.com/api/propiedades/miraiz";
 var cacheSecs   = int.TryParse(cfg["CacheSeconds"], out var s) ? s : 90;
-var apiKey      = cfg["API_KEY"] ?? Environment.GetEnvironmentVariable("BACK_API_KEY") ?? "demo-key";
+var apiKey      = cfg["x-api-key"] ?? Environment.GetEnvironmentVariable("BACK_API_KEY") ?? "EOh1Bt9a1aiwEOaCXkrzOxDOmgUNVMGSAeMStF6W";
 var llmProvider = (cfg["LLM_PROVIDER"] ?? "mock").ToLowerInvariant();
 var llmApiKey   = cfg["LLM_API_KEY"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
 var llmModel    = cfg["LLM_MODEL"] ?? cfg["OpenAI:Model"] ?? "gpt-4o-mini";
-var propsLiteUrl = cfg["PropsLiteBaseUrl"] ?? "http://localhost:5002/api/propiedades/miraiz";
+var propsLiteUrl = cfg["PropsLiteBaseUrl"] ?? "https://test.controldepropiedades.com/api/propiedades/miraiz";
+var propsLiteApiKey = cfg["PropsLiteApiKey"];
 var debugEnabled = bool.TryParse(cfg["Debug:Enable"] ?? Environment.GetEnvironmentVariable("DEBUG_ENABLE"), out var de) && de;
 
-// JSON options (con tildes en claves)
 var jsonOpts = new JsonSerializerOptions {
   PropertyNamingPolicy = null,
   WriteIndented = false,
   Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
 };
 
-// Rate Limiter para /api/nlq
 builder.Services.AddRateLimiter(options =>
 {
   options.AddFixedWindowLimiter("nlq", opt =>
@@ -43,25 +41,23 @@ builder.Services.AddRateLimiter(options =>
   });
 });
 
-// DI: PropsTool
 builder.Services.AddSingleton<PropsTool>(sp =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
     var cache = sp.GetRequiredService<IMemoryCache>();
-    var url = config["PropsLiteBaseUrl"] ?? "http://localhost:5002/api/propiedades/miraiz";
-    return new PropsTool(url, cache);
+  var url = config["PropsLiteBaseUrl"] ?? "https://test.controldepropiedades.com/api/propiedades/miraiz";
+  var apiKeyLite = config["PropsLiteApiKey"];
+  return new PropsTool(url, apiKeyLite, cache);
 });
 
-// DI: ILlmClient (mock por defecto para /interactions)
 builder.Services.AddSingleton<ILlmClient>(sp =>
 {
   var factory = sp.GetRequiredService<IHttpClientFactory>();
   return llmProvider == "openai" && !string.IsNullOrWhiteSpace(llmApiKey)
     ? new LlmOpenAi(factory.CreateClient(), llmApiKey, llmModel)
-    : new LlmMock(factory.CreateClient(), catalogUrl);
+    : new LlmMock(factory.CreateClient(), propsLiteUrl);
 });
 
-// DI: ILlmChat (para /api/nlq con function calling)
 builder.Services.AddSingleton<ILlmChat>(sp =>
 {
   var factory = sp.GetRequiredService<IHttpClientFactory>();
@@ -73,10 +69,8 @@ builder.Services.AddSingleton<ILlmChat>(sp =>
 
 var app = builder.Build();
 
-// Rate limiter
 app.UseRateLimiter();
 
-// Exception handler (desarrollo)
 app.Use(async (ctx, next) => {
   try {
     await next();
@@ -88,7 +82,6 @@ app.Use(async (ctx, next) => {
   }
 });
 
-// CORS simple (demo) + preflight
 app.Use(async (ctx, next) => {
   ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
   ctx.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
@@ -97,10 +90,9 @@ app.Use(async (ctx, next) => {
   await next();
 });
 
-// API-KEY para /interactions y /metrics
 app.Use(async (ctx, next) => {
   var p = ctx.Request.Path.ToString();
-  var protectedRoute = p.StartsWith("/interactions") || p.StartsWith("/metrics");
+  var protectedRoute = p.StartsWith("/metrics");
   if (!protectedRoute) { await next(); return; }
   var auth = ctx.Request.Headers.Authorization.ToString();
   if (auth == $"Bearer {apiKey}") { await next(); }
@@ -109,7 +101,6 @@ app.Use(async (ctx, next) => {
 
 var store = new InteractionStore();
 
-// GET /properties  (proxy + cache 90s)
 app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClientFactory httpFactory) =>
 {
   if (cache.TryGetValue("props", out object? cached) && cached is not null)
@@ -117,7 +108,6 @@ app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClien
     var cachedJson = JsonSerializer.Serialize(cached, jsonOpts);
     var etag = $"\"{cachedJson.GetHashCode():X}\"";
     
-    // Check If-None-Match
     if (ctx.Request.Headers.IfNoneMatch == etag)
     {
       ctx.Response.StatusCode = StatusCodes.Status304NotModified;
@@ -134,9 +124,10 @@ app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClien
 
   ApiResp? api = null;
   try {
-    var response = await http.GetAsync(catalogUrl);
+    using var req = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+    if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) req.Headers.Add("x-api-key", propsLiteApiKey);
+    var response = await http.SendAsync(req);
     
-    // Si no está autorizado, retornar catálogo vacío o de ejemplo
     if (!response.IsSuccessStatusCode) {
       var fallbackData = new ApiResp { 
         success = true, 
@@ -152,7 +143,6 @@ app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClien
     
     api = await response.Content.ReadFromJsonAsync<ApiResp>();
   } catch (Exception ex) {
-    // fallback en caso de error
     Console.WriteLine($"Error obteniendo catálogo: {ex.Message}");
     var fallbackData = new ApiResp { 
       success = true, 
@@ -166,7 +156,6 @@ app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClien
     return Results.Text(fallbackJson, "application/json", Encoding.UTF8);
   }
 
-  // Normalizar claves con tilde (si vinieran sin tilde)
   if (api is not null && api.data is not null) {
     foreach (var p in api.data) {
       if (p.BanosSinTilde is not null && p.BanosConTilde is null) p.BanosConTilde = p.BanosSinTilde;
@@ -182,23 +171,88 @@ app.MapGet("/properties", async (HttpContext ctx, IMemoryCache cache, IHttpClien
   return Results.Text(resultJson, "application/json", Encoding.UTF8);
 });
 
-// GET /interactions?userId=...
-app.MapGet("/interactions", (string? userId) => Results.Json(store.List(userId), jsonOpts));
+app.MapGet("/interactions", () => Results.Json(store.List(), jsonOpts));
 
-// POST /interactions
+// Catálogo: utilidades de diagnóstico ligeras
+app.MapGet("/api/catalog/summary", async (IMemoryCache cache, IHttpClientFactory httpFactory) =>
+{
+  var http = httpFactory.CreateClient();
+  http.Timeout = TimeSpan.FromSeconds(5);
+
+  ApiResp? api = null;
+  try
+  {
+    using var req = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+    if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) req.Headers.Add("x-api-key", propsLiteApiKey);
+    var response = await http.SendAsync(req);
+    if (!response.IsSuccessStatusCode)
+      return Results.Json(new { success = false, error = $"Catálogo remoto respondió {response.StatusCode}", source = propsLiteUrl });
+
+    api = await response.Content.ReadFromJsonAsync<ApiResp>();
+  }
+  catch (Exception ex)
+  {
+    return Results.Json(new { success = false, error = ex.Message, source = propsLiteUrl });
+  }
+
+  var items = api?.data ?? new List<PropertyItem>();
+  // Normalización mínima
+  foreach (var p in items)
+  {
+    if (p.BanosSinTilde is not null && p.BanosConTilde is null) p.BanosConTilde = p.BanosSinTilde;
+    if (p.AnoSinTilde is not null && p.AnoConTilde is null) p.AnoConTilde = p.AnoSinTilde;
+  }
+
+  var total = items.Count;
+  var minId = items.Count > 0 ? items.Min(x => x.id) : (int?)null;
+  var maxId = items.Count > 0 ? items.Max(x => x.id) : (int?)null;
+  var estados = items
+    .GroupBy(x => (x.estado ?? "").ToLowerInvariant())
+    .ToDictionary(g => g.Key, g => g.Count());
+
+  return Results.Json(new { success = true, source = propsLiteUrl, total, minId, maxId, estados }, jsonOpts);
+});
+
+app.MapPost("/api/catalog/refresh", async (IMemoryCache cache, IHttpClientFactory httpFactory) =>
+{
+  cache.Remove("props");
+  cache.Remove("all_props");
+  // Devolver el resumen inmediatamente después de limpiar caché
+  var http = httpFactory.CreateClient();
+  http.Timeout = TimeSpan.FromSeconds(5);
+  try
+  {
+    using var req = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+    if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) req.Headers.Add("x-api-key", propsLiteApiKey);
+    var response = await http.SendAsync(req);
+    if (!response.IsSuccessStatusCode)
+      return Results.Json(new { success = false, error = $"Catálogo remoto respondió {response.StatusCode}", source = propsLiteUrl });
+
+    var api = await response.Content.ReadFromJsonAsync<ApiResp>();
+    var items = api?.data ?? new List<PropertyItem>();
+    var total = items.Count;
+    var minId = items.Count > 0 ? items.Min(x => x.id) : (int?)null;
+    var maxId = items.Count > 0 ? items.Max(x => x.id) : (int?)null;
+    return Results.Json(new { success = true, source = propsLiteUrl, total, minId, maxId }, jsonOpts);
+  }
+  catch (Exception ex)
+  {
+    return Results.Json(new { success = false, error = ex.Message, source = propsLiteUrl });
+  }
+});
+
 app.MapPost("/interactions", async (HttpContext ctx, Interaction input, ILlmClient llm, IHttpClientFactory httpFactory) =>
 {
-  Console.WriteLine($"POST /interactions - UserId: {input.UserId}, PropiedadId: {input.PropiedadId}, Pregunta: {input.Pregunta}");
+  Console.WriteLine($"POST /interactions - PropiedadId: {input.PropiedadId}, Pregunta: {input.Pregunta}");
   
   if (ctx.Request.ContentLength is > 4096)
     return Results.BadRequest(new { error = "Body demasiado grande" });
 
-  input.UserId   = Sanitize(input.UserId);
   input.Pregunta = Sanitize(input.Pregunta);
   
-  if (string.IsNullOrWhiteSpace(input.UserId) || string.IsNullOrWhiteSpace(input.Pregunta)) {
-    Console.WriteLine($"Validación fallida - UserId: '{input.UserId}', Pregunta: '{input.Pregunta}'");
-    return Results.BadRequest(new { error = "Campos requeridos: userId, pregunta" });
+  if (string.IsNullOrWhiteSpace(input.Pregunta)) {
+    Console.WriteLine($"Validación fallida - Pregunta vacía");
+    return Results.BadRequest(new { error = "Campo requerido: pregunta" });
   }
   if (input.Pregunta.Length > 500)
     return Results.BadRequest(new { error = "Pregunta muy larga" });
@@ -209,14 +263,15 @@ app.MapPost("/interactions", async (HttpContext ctx, Interaction input, ILlmClie
   input.Status    = "pendiente";
   input.CreatedAt = DateTime.UtcNow;
 
-  // Construir contexto con la propiedad (solo campos necesarios)
   PropertyContext? propCtx = null;
   if (input.PropiedadId is not null) {
     var http = httpFactory.CreateClient();
     http.Timeout = TimeSpan.FromSeconds(5);
     
     try {
-      var response = await http.GetAsync(catalogUrl, ctx.RequestAborted);
+        using var reqProp = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+        if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) reqProp.Headers.Add("x-api-key", propsLiteApiKey);
+        var response = await http.SendAsync(reqProp, ctx.RequestAborted);
       if (response.IsSuccessStatusCode) {
         var data = await response.Content.ReadFromJsonAsync<ApiResp>(cancellationToken: ctx.RequestAborted);
         var x = data?.data?.FirstOrDefault(r => r.id == input.PropiedadId);
@@ -229,7 +284,6 @@ app.MapPost("/interactions", async (HttpContext ctx, Interaction input, ILlmClie
       }
     } catch (Exception ex) {
       Console.WriteLine($"Error obteniendo propiedad {input.PropiedadId}: {ex.Message}");
-      // Continuar sin contexto si falla
     }
   }
 
@@ -240,10 +294,8 @@ app.MapPost("/interactions", async (HttpContext ctx, Interaction input, ILlmClie
   return Results.Json(input, jsonOpts);
 });
 
-// GET /metrics/interactions
 app.MapGet("/metrics/interactions", () => Results.Json(store.Metrics(), jsonOpts));
 
-// POST /api/nlq (NLQ con LLM + Function Calling)
 app.MapPost("/api/nlq", async (NlqRequest req, ILlmChat llm, ILoggerFactory lf, CancellationToken ct) =>
 {
   var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -271,7 +323,34 @@ app.MapPost("/api/nlq", async (NlqRequest req, ILlmChat llm, ILoggerFactory lf, 
   }
 }).RequireRateLimiting("nlq");
 
-// GET /api/propiedades/miraiz-lite (endpoint lite con field mask y cursor)
+// GET helper para probar NLQ vía querystring (misma lógica que POST)
+app.MapGet("/api/nlq", async (string query, int? limit, string? estado, string? locale, ILlmChat llm, ILoggerFactory lf, CancellationToken ct) =>
+{
+  var sw = System.Diagnostics.Stopwatch.StartNew();
+  var trace = Guid.NewGuid().ToString("N");
+  var q = (query ?? "").Trim();
+  if (string.IsNullOrWhiteSpace(q))
+    return Results.BadRequest(new { success = false, error = "query vacío", trace_id = trace });
+
+  try
+  {
+    var r = await llm.RunAsync(q, Math.Clamp(limit ?? 10, 1, 100), estado, locale, ct);
+    sw.Stop();
+    return Results.Ok(new NlqResponse(true, r.Answer, r.ToolPayload, r.ToolArgs, sw.ElapsedMilliseconds, trace));
+  }
+  catch (Exception ex)
+  {
+    sw.Stop();
+    lf.CreateLogger("NLQ").LogError(ex, "NLQ error {Trace}", trace);
+    return Results.Problem(
+      statusCode: 502,
+      title: "NLQ_FAILED",
+      detail: "No fue posible consultar el catálogo",
+      extensions: new Dictionary<string, object?> { ["trace_id"] = trace, ["latency_ms"] = sw.ElapsedMilliseconds }
+    );
+  }
+}).RequireRateLimiting("nlq");
+
 app.MapGet("/api/propiedades/miraiz-lite", async (
   HttpContext ctx,
   IMemoryCache cache,
@@ -292,7 +371,9 @@ app.MapGet("/api/propiedades/miraiz-lite", async (
   ApiResp? api = null;
   try
   {
-    var response = await http.GetAsync(catalogUrl);
+    using var req = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+    if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) req.Headers.Add("x-api-key", propsLiteApiKey);
+    var response = await http.SendAsync(req);
     if (!response.IsSuccessStatusCode)
     {
       var fallbackData = new { success = true, data = new object[0], cursor = (int?)null };
@@ -316,27 +397,30 @@ app.MapGet("/api/propiedades/miraiz-lite", async (
     return Results.Text(JsonSerializer.Serialize(fallbackData, jsonOpts), "application/json", Encoding.UTF8);
   }
 
-  // Normalizar claves con tilde
   foreach (var p in api.data)
   {
     if (p.BanosSinTilde is not null && p.BanosConTilde is null) p.BanosConTilde = p.BanosSinTilde;
     if (p.AnoSinTilde is not null && p.AnoConTilde is null) p.AnoConTilde = p.AnoSinTilde;
   }
 
-  // Filtrar por estado
   var filtered = api.data.AsEnumerable();
   if (!string.IsNullOrWhiteSpace(estado))
-    filtered = filtered.Where(p => p.estado?.Equals(estado, StringComparison.OrdinalIgnoreCase) == true);
+  {
+    var estados = estado.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(e => e.Trim())
+                        .Where(e => e.Length > 0)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (estados.Count > 0)
+      filtered = filtered.Where(p => p.estado != null && estados.Contains(p.estado));
+  }
 
-  // Cursor (afterId)
   if (afterId.HasValue)
     filtered = filtered.Where(p => p.id > afterId.Value);
 
-  // Limit
   var maxLimit = Math.Clamp(limit ?? 20, 1, 100);
+  filtered = filtered.OrderBy(p => p.id);
   var items = filtered.Take(maxLimit).ToList();
 
-  // Field mask
   var requestedFields = (fields ?? "id,propiedad,precio,imagenes.url").Split(',', StringSplitOptions.RemoveEmptyEntries)
     .Select(f => f.Trim().ToLowerInvariant()).ToHashSet();
 
@@ -386,10 +470,83 @@ app.MapGet("/api/propiedades/miraiz-lite", async (
   return Results.Text(JsonSerializer.Serialize(result, jsonOpts), "application/json", Encoding.UTF8);
 });
 
-// DEBUG-ONLY endpoints (controlled via Debug:Enable or DEBUG_ENABLE=true)
+app.MapGet("/api/propiedades/miraiz", async (
+  HttpContext ctx,
+  IMemoryCache cache,
+  IHttpClientFactory httpFactory,
+  string? estado,
+  int? afterId,
+  int? limit) =>
+{
+  var cacheKey = $"miraiz-official:{estado}:{afterId}:{limit}";
+
+  if (cache.TryGetValue(cacheKey, out object? cached) && cached is not null)
+    return Results.Text(JsonSerializer.Serialize(cached, jsonOpts), "application/json", Encoding.UTF8);
+
+  var http = httpFactory.CreateClient();
+  http.Timeout = TimeSpan.FromSeconds(5);
+
+  ApiResp? api = null;
+  try
+  {
+    using var req = new HttpRequestMessage(HttpMethod.Get, propsLiteUrl);
+    if (!string.IsNullOrWhiteSpace(propsLiteApiKey)) req.Headers.Add("x-api-key", propsLiteApiKey);
+    var response = await http.SendAsync(req);
+    if (!response.IsSuccessStatusCode)
+    {
+      var fallbackData = new { success = true, data = new object[0], cursor = (int?)null };
+      cache.Set(cacheKey, fallbackData, TimeSpan.FromSeconds(cacheSecs));
+      return Results.Text(JsonSerializer.Serialize(fallbackData, jsonOpts), "application/json", Encoding.UTF8);
+    }
+
+    api = await response.Content.ReadFromJsonAsync<ApiResp>();
+  }
+  catch (Exception ex)
+  {
+    Console.WriteLine($"Error obteniendo catálogo (alias miraiz): {ex.Message}");
+    var fallbackData = new { success = true, data = new object[0], cursor = (int?)null };
+    cache.Set(cacheKey, fallbackData, TimeSpan.FromSeconds(cacheSecs));
+    return Results.Text(JsonSerializer.Serialize(fallbackData, jsonOpts), "application/json", Encoding.UTF8);
+  }
+
+  if (api is null || api.data is null)
+  {
+    var fallbackData = new { success = true, data = new object[0], cursor = (int?)null };
+    return Results.Text(JsonSerializer.Serialize(fallbackData, jsonOpts), "application/json", Encoding.UTF8);
+  }
+
+  foreach (var p in api.data)
+  {
+    if (p.BanosSinTilde is not null && p.BanosConTilde is null) p.BanosConTilde = p.BanosSinTilde;
+    if (p.AnoSinTilde is not null && p.AnoConTilde is null) p.AnoConTilde = p.AnoSinTilde;
+  }
+
+  var filtered = api.data.AsEnumerable();
+  if (!string.IsNullOrWhiteSpace(estado))
+  {
+    var estados = estado.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(e => e.Trim())
+                        .Where(e => e.Length > 0)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (estados.Count > 0)
+      filtered = filtered.Where(p => p.estado != null && estados.Contains(p.estado));
+  }
+
+  if (afterId.HasValue)
+    filtered = filtered.Where(p => p.id > afterId.Value);
+
+  var maxLimit = Math.Clamp(limit ?? 20, 1, 100);
+  filtered = filtered.OrderBy(p => p.id);
+  var items = filtered.Take(maxLimit).ToList();
+
+  var nextCursor = items.Count == maxLimit ? items.Last().id : (int?)null;
+  var result = new { success = true, data = items, cursor = nextCursor };
+  cache.Set(cacheKey, result, TimeSpan.FromSeconds(cacheSecs));
+  return Results.Text(JsonSerializer.Serialize(result, jsonOpts), "application/json", Encoding.UTF8);
+});
+
 if (debugEnabled)
 {
-  // GET /debug/props-sample?limit=10&zone=1&q=zona+1
   app.MapGet("/debug/props-sample", async (HttpContext ctx, PropsTool propsTool, int? limit, int? zone, string? q, int? minBanos, bool? casasOnly) =>
   {
     var all = await propsTool.GetAllPropsAsync(ctx.RequestAborted);
@@ -436,7 +593,6 @@ if (debugEnabled)
 
 app.Run();
 
-// ===== Helpers, modelos y DTOs =====
 static string Sanitize(string? s)
 {
   if (string.IsNullOrEmpty(s)) return "";
@@ -452,7 +608,6 @@ static bool IsPromptInjection(string q)
 
 public class Interaction {
   public string? Id { get; set; }
-  public string UserId { get; set; } = "u-demo";
   public int? PropiedadId { get; set; }
   public string Pregunta { get; set; } = "";
   public string? Respuesta { get; set; }
@@ -463,7 +618,7 @@ public class Interaction {
 public class InteractionStore {
   private readonly List<Interaction> _list = new();
   public void Add(Interaction i) => _list.Add(i);
-  public IEnumerable<Interaction> List(string? userId) => _list.Where(x => userId == null || x.UserId == userId);
+  public IEnumerable<Interaction> List() => _list;
   public object Metrics() => new {
     counts = _list.GroupBy(x => x.Status ?? "pendiente").ToDictionary(g => g.Key!, g => g.Count()),
     total = _list.Count

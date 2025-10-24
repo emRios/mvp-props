@@ -6,14 +6,16 @@ namespace Backend.Services;
 public class PropsTool
 {
   private readonly string _catalogUrl;
+  private readonly string? _apiKey;
   private readonly IMemoryCache _cache;
-  private readonly int _cacheSecs = 90; // Default cache duration
+    private readonly int _cacheSecs = 90;
   private readonly JsonSerializerOptions _json = new() { PropertyNamingPolicy = null };
   private static readonly HttpClient _http = new HttpClient();
 
-  public PropsTool(string catalogUrl, IMemoryCache cache)
+  public PropsTool(string catalogUrl, string? apiKey, IMemoryCache cache)
   {
     _catalogUrl = catalogUrl;
+    _apiKey = apiKey;
     _cache = cache;
   }
 
@@ -25,6 +27,11 @@ public class PropsTool
     }
 
     using var req = new HttpRequestMessage(HttpMethod.Get, _catalogUrl);
+    if (!string.IsNullOrWhiteSpace(_apiKey))
+    {
+      req.Headers.Remove("x-api-key");
+      req.Headers.Add("x-api-key", _apiKey);
+    }
     using var res = await _http.SendAsync(req, ct);
     
     if (!res.IsSuccessStatusCode)

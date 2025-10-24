@@ -2,6 +2,7 @@
 // Base para imágenes. Si no está configurado, usaremos VITE_API_BASE como respaldo.
 const IMAGE_BASE = (import.meta.env.VITE_IMAGE_BASE || '').replace(/\/$/, '');
 const API_BASE_FALLBACK = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+const IS_DEV = !!import.meta.env.DEV;
 
 // Cache para imágenes precargadas
 const imageCache = new Map();
@@ -74,9 +75,10 @@ export function getImageUrl(url) {
   if (/^https?:\/\//i.test(url)) return url;
   // Normalizar para asegurar un solo '/'
   const path = url.startsWith('/') ? url : `/${url}`;
-  // Si es relativa ("/mvp-props/images/..."), prepender base conocida
+  // En desarrollo, mantener ruta relativa para que el proxy de Vite maneje CORS (server.proxy)
+  if (IS_DEV) return path;
+  // En producción, construir URL absoluta
   if (IMAGE_BASE) return `${IMAGE_BASE}${path}`;
   if (API_BASE_FALLBACK) return `${API_BASE_FALLBACK}${path}`;
-  // Último recurso: devolver relativa al origen actual (puede 404 si el host no sirve imágenes)
   return path;
 }

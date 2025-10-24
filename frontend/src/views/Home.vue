@@ -32,9 +32,13 @@
     
     <div v-else>
       <div class="stats">
-        <p>{{ items.length }} propiedades en página {{ currentPage }}</p>
+        <p>
+          {{ items.length }} propiedades en página {{ currentPage }}
+          <span v-if="totalPages > 0">de {{ totalPages }}</span>
+          · <strong>Total:</strong> {{ totalItems }}
+        </p>
         <p v-if="hasMore" class="page-info">Hay más propiedades disponibles</p>
-        <p v-if="latency" class="latency">⚡ Cargadas en {{ latency }}ms (ultra-rápido)</p>
+  <p v-if="latency" class="latency">Cargadas en {{ latency }}ms</p>
         <div class="agent-controls">
           <button 
             class="agent-btn" 
@@ -42,7 +46,7 @@
             @click="toggleVoiceAgent"
             :aria-pressed="agentMode"
           >
-            {{ agentMode ? (isListening ? '● Grabando… (toca para detener)' : 'Agente activo') : '🎙 Activar agente' }}
+            {{ agentMode ? (isListening ? 'Grabando (toca para detener)' : 'Agente activo') : 'Activa agente' }}
           </button>
           <span v-if="voiceStatus" class="agent-status">{{ voiceStatus }}</span>
         </div>
@@ -108,7 +112,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
-import { getProperties, askNLQ } from '../api';
+import { getProperties, getAllProperties, askNLQ } from '../api';
 import HeroSearch from '../components/HeroSearch.vue';
 import PropertyCard from '../components/PropertyCard.vue';
 import { preloadImage, getImageUrl } from '../utils/images';
@@ -127,7 +131,7 @@ const showDebug = ref(import.meta.env.DEV); // Solo en desarrollo
 
 // Paginación cursor-based
 const currentPage = ref(1);
-const itemsPerPage = ref(12);
+const itemsPerPage = ref(25);
 const totalItems = ref(0);
 const totalPages = ref(1);
 const cursors = ref([]); // Almacenar cursor devuelto por cada página (para cargar la siguiente)
@@ -144,11 +148,58 @@ let recognition = null;
 const dictatedLocation = ref('');
 const agentMode = ref(false); // cuando está activo, el botón Buscar usa NLQ
 
+// Carga TODO el catálogo y pagina en cliente
+const loadAllData = async () => {
+  try {
+    loading.value = true;
+    error.value = null;
+  console.log('Cargando catálogo completo para paginar en cliente…');
+
+    const start = Date.now();
+    // Lote más grande para minimizar viajes (ajustable)
+    const r = await getAllProperties(500);
+    latency.value = Date.now() - start;
+
+    if (!r?.success) throw new Error('Error en la respuesta del servidor');
+
+    const all = Array.isArray(r.data) ? r.data : [];
+    // Paginar del lado del cliente estrictamente a 12 por página
+    allItemsBuffer.value = all;
+    const total = all.length;
+    totalItems.value = total;
+    totalPages.value = Math.max(1, Math.ceil(total / itemsPerPage.value));
+    loadedPages.value = totalPages.value;
+    hasMore.value = false;
+
+    itemsByPage.value = {};
+    for (let p = 1; p <= totalPages.value; p++) {
+      const startIdx = (p - 1) * itemsPerPage.value;
+      const endIdx = startIdx + itemsPerPage.value;
+      itemsByPage.value[p] = all.slice(startIdx, endIdx);
+    }
+
+    currentPage.value = 1;
+    items.value = itemsByPage.value[1] || [];
+  // Precargar imágenes del primer page para respuesta inmediata
+  preloadFirstImages();
+  // Y precargar imágenes principales del resto para que la paginación sea instantánea
+  preloadAllImages();
+
+  console.log(`Catálogo completo cargado (${total} items) en ${latency.value}ms`);
+  } catch (e) {
+  console.error('Error cargando catálogo completo:', e);
+    error.value = e.message;
+  } finally {
+    loading.value = false;
+  }
+};
+
+// Modo cursor (queda disponible si se necesitara en el futuro)
 const loadData = async (page = 1) => {
   try {
     loading.value = true;
     error.value = null;
-    console.log(`⚡ Cargando página ${page} con endpoint ultra-rápido`);
+  console.log(`Cargando página ${page} con endpoint ultra-rápido`);
     
     // Determinar cursor para esta página
     let afterId = null;
@@ -160,7 +211,7 @@ const loadData = async (page = 1) => {
     const r = await getProperties(page, itemsPerPage.value, afterId);
     latency.value = Date.now() - start;
     
-    console.log('📦 Respuesta ultra-rápida procesada:', r);
+  console.log('Respuesta ultra-rápida procesada:', r);
     
     if (!r.success) {
       throw new Error('Error en la respuesta del servidor');
@@ -212,7 +263,7 @@ const loadData = async (page = 1) => {
       totalItems.value = allItemsBuffer.value ? allItemsBuffer.value.length : items.value.length;
     }
 
-    console.log(`⚡ Página ${page} cargada en ${latency.value}ms: ${items.value.length} propiedades`);
+  console.log(`Página ${page} cargada en ${latency.value}ms: ${items.value.length} propiedades`);
     console.log(`📊 Páginas disponibles: ${loadedPages.value} | hasMore: ${hasMore.value}`);
     
     // Precargar imágenes solo de la página actual
@@ -224,7 +275,7 @@ const loadData = async (page = 1) => {
     }
     
   } catch (e) {
-    console.error('❌ Error cargando propiedades:', e);
+  console.error('Error cargando propiedades:', e);
     error.value = e.message;
   } finally {
     loading.value = false;
@@ -233,7 +284,7 @@ const loadData = async (page = 1) => {
 
 const handlePageChange = (page) => {
   if (page === currentPage.value) return;
-  // Si ya está cacheada, mostrar sin pedir al servidor
+  // Con paginación en cliente, mostramos desde cache
   if (itemsByPage.value[page]) {
     currentPage.value = page;
     items.value = itemsByPage.value[page];
@@ -241,7 +292,7 @@ const handlePageChange = (page) => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
     return;
   }
-  // Si no está cacheada pero hay más, pedir siguiente secuencialmente
+  // Si no está cacheada pero hay más, pedir siguiente secuencialmente (cursor-based)
   if (page === loadedPages.value + 1 && hasMore.value) {
     loadData(page);
   }
@@ -264,6 +315,21 @@ const preloadFirstImages = () => {
         preloadImage(optimized).catch(() => {
           // Ignorar errores de precarga silenciosamente
         });
+      }
+    }
+  });
+};
+
+// Precarga la imagen principal de todas las propiedades cargadas en memoria
+const preloadAllImages = () => {
+  const all = allItemsBuffer.value || [];
+  all.forEach(property => {
+    if (property.imagenes && property.imagenes.length > 0) {
+      const firstImage = property.imagenes[0];
+      if (firstImage?.url) {
+        const baseUrl = getImageUrl(firstImage.url);
+        const optimized = generateOptimizedUrl(baseUrl, 800, 85);
+        preloadImage(optimized).catch(() => {});
       }
     }
   });
@@ -306,7 +372,7 @@ async function runNLQ(query) {
   try {
     loading.value = true;
     dictatedLocation.value = query; // Rellenar 'Ubicación' con lo dictado
-    const r = await askNLQ(query, { userId: 'u-demo', limit: itemsPerPage.value });
+  const r = await askNLQ(query);
     if (!r?.success) {
       const errMsg = (r?.error || '').toString();
       const isTimeout = errMsg.toLowerCase().includes('abort');
@@ -364,6 +430,16 @@ async function runNLQ(query) {
     voiceStatus.value = 'No se pudo completar la búsqueda';
   } finally {
     loading.value = false;
+    // Desactivar el agente para que el botón muestre "Activa agente" tras la búsqueda
+    try {
+      if (recognition && isListening.value) {
+        recognition.stop();
+      }
+    } catch (e) {
+      // ignorar errores de parada
+    }
+    isListening.value = false;
+    agentMode.value = false;
   }
 }
 
@@ -449,7 +525,7 @@ async function handleFormSearch(filters) {
 // (Sin fallback local por petición del usuario)
 
 onMounted(() => {
-  console.log('🚀 Home.vue montado - iniciando carga con paginación');
+  console.log('Home.vue montado - iniciando carga con paginación servidor (25 por página)');
   loadData(1);
 });
 

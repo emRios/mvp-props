@@ -13,19 +13,19 @@
     </div>
     
     <!-- Imagen principal con soporte WebP -->
-    <picture class="picture-element">
-      <!-- WebP para navegadores compatibles -->
+    <picture class="picture-element" :key="displaySrc + ':' + currentIndex + (isUsingFallback ? ':fb' : ':img')">
+      <!-- WebP para navegadores compatibles (deshabilitado si usamos fallback) -->
       <source 
-        v-if="webpSrc" 
+        v-if="!isUsingFallback && webpSrc" 
         :srcset="webpSrcSet"
         type="image/webp"
       />
-      
-      <!-- Fallback JPEG/PNG -->
+  
+      <!-- Imagen seleccionada -->
       <img
         ref="imageRef"
-        :src="currentSrc"
-        :srcset="srcSet"
+        :src="displaySrc"
+        :srcset="displaySrcSet"
         :alt="alt"
         :loading="lazyLoading ? 'lazy' : 'eager'"
         class="optimized-img"
@@ -56,7 +56,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { generateOptimizedUrl } from '../utils/imageOptimization';
 import { isImageCached } from '../utils/images';
 
@@ -68,7 +68,14 @@ const props = defineProps({
   lazyLoading: { type: Boolean, default: true },
   priority: { type: Boolean, default: false }, // Para imágenes críticas
   placeholder: { type: String, default: null },
-  quality: { type: Number, default: 85 }
+  quality: { type: Number, default: 85 },
+  // Imagen de respaldo si la principal falla
+  fallbackSrc: { type: String, default: '/placeholder-property.svg' },
+  // Lista de URLs alternativas para intentar en caso de fallo
+  candidates: { type: Array, default: () => [] },
+  // Control de intentos/timeout por fuente
+  maxTries: { type: Number, default: 2 },
+  perTryTimeoutMs: { type: Number, default: 1500 }
 });
 
 const imageRef = ref(null);
@@ -76,9 +83,13 @@ const isLoading = ref(true);
 const hasError = ref(false);
 const showPlaceholder = ref(true);
 const observer = ref(null);
+const usedFallback = ref(false);
+const currentIndex = ref(0);
+let tryTimer = null;
+let attemptCount = 0;
 
 // Generar URLs optimizadas
-const currentSrc = computed(() => {
+const primarySrc = computed(() => {
   if (!props.src) return '';
   return generateOptimizedUrl(props.src, 800, props.quality);
 });
@@ -99,16 +110,36 @@ const webpSrc = computed(() => {
 const webpSrcSet = computed(() => {
   if (!props.src) return '';
   const sizes = [400, 800, 1200, 1600];
-  return sizes.map(size => 
-    `${generateOptimizedUrl(props.src, size, props.quality, 'webp')} ${size}w`
-  ).join(', ');
+  return sizes.map(size => `${generateOptimizedUrl(props.src, size, props.quality, 'webp')} ${size}w`).join(', ');
+});
+
+// Estado activo (fallback o principal)
+const isUsingFallback = computed(() => usedFallback.value || !props.src);
+const candidatesList = computed(() => {
+  const base = primarySrc.value ? [primarySrc.value] : [];
+  const extras = Array.isArray(props.candidates) ? props.candidates : [];
+  return [...base, ...extras].filter(Boolean);
+});
+const displaySrc = computed(() => {
+  if (isUsingFallback.value) return props.fallbackSrc;
+  return candidatesList.value[Math.min(currentIndex.value, Math.max(0, candidatesList.value.length - 1))] || '';
+});
+const displaySrcSet = computed(() => {
+  if (isUsingFallback.value) return '';
+  // Cuando usamos candidatos alternos que ya podrían venir optimizados, evitamos forzar srcset adicional
+  return currentIndex.value === 0 ? srcSet.value : '';
 });
 
 const placeholderSrc = computed(() => {
+  // Priorizar placeholder explícito o el fallback local para que SIEMPRE se vea algo
   if (props.placeholder) return props.placeholder;
-  // Generar placeholder de baja calidad (blur effect)
+  if (props.fallbackSrc) return props.fallbackSrc;
+  // Último recurso: miniatura del src
   return generateOptimizedUrl(props.src, 40, 20, 'webp');
 });
+
+// Nota CORS: No fijamos atributos crossorigin/referrerpolicy para permitir que
+// el navegador envíe el Referer por defecto a dominios externos y evitar bloqueos.
 
 // Cache de imágenes decodificadas (para evitar parpadeo en re-montajes)
 const decodedCache = new Set();
@@ -116,13 +147,49 @@ const decodedCache = new Set();
 function handleLoad() {
   isLoading.value = false;
   showPlaceholder.value = false;
-  if (currentSrc.value) decodedCache.add(currentSrc.value);
+  if (displaySrc.value) decodedCache.add(displaySrc.value);
+  if (tryTimer) { clearTimeout(tryTimer); tryTimer = null; }
 }
 
 function handleError() {
+  // Intentar siguiente candidato si existe
+  if (currentIndex.value < candidatesList.value.length - 1) {
+    currentIndex.value += 1;
+    hasError.value = false;
+    scheduleTryTimeout();
+    return;
+  }
+  // Luego, intentar fallback una sola vez
+  if (!usedFallback.value && props.fallbackSrc) {
+    usedFallback.value = true; // fuerza isUsingFallback/displaySrc
+    isLoading.value = false;
+    hasError.value = false;
+    showPlaceholder.value = false;
+    if (tryTimer) { clearTimeout(tryTimer); tryTimer = null; }
+    return;
+  }
   isLoading.value = false;
   hasError.value = true;
   showPlaceholder.value = false;
+}
+
+function scheduleTryTimeout() {
+  if (tryTimer) { clearTimeout(tryTimer); tryTimer = null; }
+  if (isUsingFallback.value || !displaySrc.value) return;
+  attemptCount += 1;
+  const timeout = Math.max(400, props.perTryTimeoutMs);
+  tryTimer = setTimeout(() => {
+    const remainingCandidates = currentIndex.value < (candidatesList.value.length - 1);
+    const moreTriesAllowed = attemptCount < Math.max(1, props.maxTries);
+    if (remainingCandidates && moreTriesAllowed) {
+      currentIndex.value += 1;
+    } else if (!usedFallback.value && props.fallbackSrc) {
+      usedFallback.value = true;
+      isLoading.value = false;
+      hasError.value = false;
+      showPlaceholder.value = false;
+    }
+  }, timeout);
 }
 
 // Intersection Observer para lazy loading avanzado
@@ -152,7 +219,7 @@ function setupIntersectionObserver() {
 
 onMounted(() => {
   // Si ya se cargó/decodificó antes, mostrar de inmediato sin placeholder
-  const url = currentSrc.value;
+  const url = primarySrc.value;
   if (url && (decodedCache.has(url) || isImageCached(url) === true)) {
     isLoading.value = false;
     showPlaceholder.value = false;
@@ -164,16 +231,22 @@ onMounted(() => {
     const img = new Image();
     img.onload = handleLoad;
     img.onerror = handleError;
-    img.src = currentSrc.value;
+    img.src = primarySrc.value;
   }
   
   setupIntersectionObserver();
+  scheduleTryTimeout();
 });
 
 onUnmounted(() => {
   if (observer.value && imageRef.value) {
     observer.value.unobserve(imageRef.value);
   }
+  if (tryTimer) { clearTimeout(tryTimer); tryTimer = null; }
+});
+
+watch(displaySrc, () => {
+  if (isLoading.value) scheduleTryTimeout();
 });
 </script>
 

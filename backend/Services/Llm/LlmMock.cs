@@ -6,13 +6,11 @@ public sealed class LlmMock(HttpClient http, string catalogUrl) : ILlmClient
 {
   public async Task<LlmResponse> AskAsync(LlmRequest req, CancellationToken ct = default)
   {
-    // Responder SOLO con datos del contexto (guardrail)
     var Q = (req.Question ?? "").ToLowerInvariant();
     var p = req.Context;
 
     if (p is null)
     {
-      // Mensaje general con conteo del catálogo (opcional)
       try {
         var json = await http.GetFromJsonAsync<ApiResp>(catalogUrl, ct);
         var total = json?.data?.Count ?? 0;
@@ -35,6 +33,5 @@ public sealed class LlmMock(HttpClient http, string catalogUrl) : ILlmClient
   }
 }
 
-// DTO local para conteo en mensaje general
 file sealed class ApiResp { public bool success { get; set; } public List<Item> data { get; set; } = new(); }
 file sealed class Item { public int id { get; set; } }
